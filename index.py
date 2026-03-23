@@ -1,31 +1,21 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 import pdfplumber
 import numpy as np
 from openai import OpenAI
+import os
 
-client = OpenAI()
+# Inicializa o servidor web e permite a conexão do front-end
+app = Flask(__name__)
+# Configura o CORS para aceitar pedidos de qualquer origem (importante para o deploy)
+CORS(app) 
 
-caminho_pdf = "data/pdf/Artigo-cientifico-Vitoria.pdf"
+# A chave da API deve ser configurada como variável de ambiente no Render
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
-# 1. EXTRAIR TEXTO
-texto_completo = ""
-
-with pdfplumber.open(caminho_pdf) as pdf:
-    for pagina in pdf.pages:
-        texto = pagina.extract_text()
-        if texto:
-            texto_completo += texto + "\n"
-
-print("Texto extraído!")
-
-# 2. DIVIDIR TEXTO
 def dividir_texto(texto, tamanho=500):
     return [texto[i:i+tamanho] for i in range(0, len(texto), tamanho)]
 
-chunks = dividir_texto(texto_completo)
-
-print(f"Total de chunks: {len(chunks)}")
-
-# 3. GERAR EMBEDDINGS
 def gerar_embedding(texto):
     response = client.embeddings.create(
         model="text-embedding-3-small",
@@ -33,67 +23,80 @@ def gerar_embedding(texto):
     )
     return response.data[0].embedding
 
-embeddings = []
-
-for i, chunk in enumerate(chunks):
-    print(f"Gerando embedding {i+1}/{len(chunks)}...")
-    vetor = gerar_embedding(chunk)
-    embeddings.append(vetor)
-
-print("Embeddings gerados!")
-
-# 4. SIMILARIDADE
 def similaridade(v1, v2):
     v1 = np.array(v1)
     v2 = np.array(v2)
     return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
 
-# 5. PERGUNTA
-pergunta = input("\nDigite sua pergunta: ")
+@app.route('/analisar', methods=['POST'])
+def analisar_pdf():
+    # Verifica se o arquivo e a pergunta foram enviados
+    if 'pdf' not in request.files or 'pergunta' not in request.form:
+        return jsonify({"erro": "PDF ou pergunta não encontrados"}), 400
+    
+    arquivo_pdf = request.files['pdf']
+    pergunta = request.form['pergunta']
+    
+    if arquivo_pdf.filename == '' or not pergunta:
+        return jsonify({"erro": "Arquivo vazio ou pergunta em branco"}), 400
 
-embedding_pergunta = gerar_embedding(pergunta)
+    try:
+        # 1. Extrair Texto do PDF recebido pelo Front
+        texto_completo = ""
+        with pdfplumber.open(arquivo_pdf) as pdf:
+            for pagina in pdf.pages:
+                texto = pagina.extract_text()
+                if texto:
+                    texto_completo += texto + "\n"
 
-# 6. CALCULAR SCORES
-scores = []
+        # 2. Dividir Texto
+        chunks = dividir_texto(texto_completo)
 
-for i in range(len(embeddings)):
-    score = similaridade(embedding_pergunta, embeddings[i])
-    scores.append((score, chunks[i]))
+        # 3. Gerar Embeddings
+        embeddings = [gerar_embedding(chunk) for chunk in chunks]
+        embedding_pergunta = gerar_embedding(pergunta)
 
-# 7. PEGAR TOP 3
-scores_ordenados = sorted(scores, reverse=True, key=lambda x: x[0])
-top_3 = scores_ordenados[:3]
+        # 4. Similaridade
+        scores = []
+        for i in range(len(embeddings)):
+            score = similaridade(embedding_pergunta, embeddings[i])
+            scores.append((score, chunks[i]))
 
-print("\n🔎 Top 3 trechos mais relevantes:\n")
+        # 5. Pegar Top 3
+        scores_ordenados = sorted(scores, reverse=True, key=lambda x: x[0])
+        top_3 = scores_ordenados[:3]
+        
+        contexto = ""
+        for score, texto in top_3:
+            contexto += texto + "\n\n"
 
-contexto = ""
+        # 6. Gerar Resposta com LLM (RAG)
+        resposta = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Responda apenas com informações presentes no texto. Se possível, cite exemplos mencionados no contexto."
+                },
+                {
+                    "role": "user",
+                    "content": f"Pergunta: {pergunta}\n\nContexto:\n{contexto}\n\nResponda de forma clara e objetiva:"
+                }
+            ]
+        )
 
-for i, (score, texto) in enumerate(top_3):
-    print(f"\n--- Trecho {i+1} (score: {score:.4f}) ---\n")
-    print(texto)
-    contexto += texto + "\n\n"
+        return jsonify({"resposta": resposta.choices[0].message.content})
 
-# 8. GERAR RESPOSTA COM LLM (RAG)
-resposta = client.chat.completions.create(
-    model="gpt-4.1-mini",
-    messages=[
-        {
-            "role": "system",
-            "content": "Responda apenas com informações presentes no texto. Se possível, cite exemplos mencionados no contexto."
-        },
-        {
-            "role": "user",
-            "content": f"""
-Pergunta: {pergunta}
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
 
-Contexto:
-{contexto}
+# Rota de teste para verificar se o servidor está online
+@app.route('/')
+def health_check():
+    return "Backend está a funcionar!", 200
 
-Responda de forma clara e objetiva:
-"""
-        }
-    ]
-)
-
-print("\n💬 Resposta final:\n")
-print(resposta.choices[0].message.content)
+if __name__ == '__main__':
+    # O Render atribui uma porta automaticamente via variável de ambiente PORT
+    port = int(os.environ.get("PORT", 5000))
+    # host='0.0.0.0' permite que o servidor seja acedido externamente
+    app.run(host='0.0.0.0', port=port)
