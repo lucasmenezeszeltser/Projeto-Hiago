@@ -5,10 +5,16 @@ import numpy as np
 from openai import OpenAI
 import os
 
-# Inicializa o servidor web e permite a conexão do front-end
+# Inicializa o servidor web
 app = Flask(__name__)
-# Configura o CORS para aceitar pedidos de qualquer origem (importante para o deploy)
-CORS(app) 
+
+# CONFIGURAÇÃO DE CORS ATUALIZADA: 
+# Libera o acesso para o seu domínio da Vercel e outros ambientes de teste
+CORS(app, resources={r"/*": {
+    "origins": "*",
+    "methods": ["GET", "POST", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization"]
+}})
 
 # A chave da API deve ser configurada como variável de ambiente no Render
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -28,8 +34,17 @@ def similaridade(v1, v2):
     v2 = np.array(v2)
     return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
 
-@app.route('/analisar', methods=['POST'])
+# ROTA DE HEALTH CHECK: Importante para saber se o Render 'acordou'
+@app.route('/', methods=['GET'])
+def health_check():
+    return jsonify({"status": "online", "mensagem": "Backend está a funcionar!"}), 200
+
+@app.route('/analisar', methods=['POST', 'OPTIONS'])
 def analisar_pdf():
+    # Trata a requisição de pré-configuração (Preflight) do navegador
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+
     # Verifica se o arquivo e a pergunta foram enviados
     if 'pdf' not in request.files or 'pergunta' not in request.form:
         return jsonify({"erro": "PDF ou pergunta não encontrados"}), 400
@@ -41,7 +56,7 @@ def analisar_pdf():
         return jsonify({"erro": "Arquivo vazio ou pergunta em branco"}), 400
 
     try:
-        # 1. Extrair Texto do PDF recebido pelo Front
+        # 1. Extrair Texto do PDF
         texto_completo = ""
         with pdfplumber.open(arquivo_pdf) as pdf:
             for pagina in pdf.pages:
@@ -75,11 +90,11 @@ def analisar_pdf():
             model="gpt-4o-mini",
             messages=[
                 {
-                    "role": "system",
+                    "role": "system", 
                     "content": "Responda apenas com informações presentes no texto. Se possível, cite exemplos mencionados no contexto."
                 },
                 {
-                    "role": "user",
+                    "role": "user", 
                     "content": f"Pergunta: {pergunta}\n\nContexto:\n{contexto}\n\nResponda de forma clara e objetiva:"
                 }
             ]
@@ -90,13 +105,14 @@ def analisar_pdf():
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
 
-# Rota de teste para verificar se o servidor está online
-@app.route('/')
-def health_check():
-    return "Backend está a funcionar!", 200
+# Adiciona cabeçalhos de CORS manualmente para garantir a compatibilidade com a Vercel
+@app.after_request
+def add_cors_headers(response):
+    response.headers.add("Access-Control-Allow-Origin", "*")
+    response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
+    response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
+    return response
 
 if __name__ == '__main__':
-    # O Render atribui uma porta automaticamente via variável de ambiente PORT
     port = int(os.environ.get("PORT", 5000))
-    # host='0.0.0.0' permite que o servidor seja acedido externamente
     app.run(host='0.0.0.0', port=port)
