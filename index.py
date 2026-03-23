@@ -8,13 +8,8 @@ import os
 # Inicializa o servidor web
 app = Flask(__name__)
 
-# CONFIGURAÇÃO DE CORS ATUALIZADA: 
-# Libera o acesso para o seu domínio da Vercel e outros ambientes de teste
-CORS(app, resources={r"/*": {
-    "origins": "*",
-    "methods": ["GET", "POST", "OPTIONS"],
-    "allow_headers": ["Content-Type", "Authorization"]
-}})
+# ✅ CORS SIMPLIFICADO (corrigido)
+CORS(app)
 
 # A chave da API deve ser configurada como variável de ambiente no Render
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
@@ -34,16 +29,13 @@ def similaridade(v1, v2):
     v2 = np.array(v2)
     return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
 
-# ROTA DE HEALTH CHECK: Importante para saber se o Render 'acordou'
+# ROTA DE HEALTH CHECK
 @app.route('/', methods=['GET'])
 def health_check():
     return jsonify({"status": "online", "mensagem": "Backend está a funcionar!"}), 200
 
-@app.route('/analisar', methods=['POST', 'OPTIONS'])
+@app.route('/analisar', methods=['POST'])
 def analisar_pdf():
-    # Trata a requisição de pré-configuração (Preflight) do navegador
-    if request.method == 'OPTIONS':
-        return jsonify({"status": "ok"}), 200
 
     # Verifica se o arquivo e a pergunta foram enviados
     if 'pdf' not in request.files or 'pergunta' not in request.form:
@@ -104,14 +96,6 @@ def analisar_pdf():
 
     except Exception as e:
         return jsonify({"erro": str(e)}), 500
-
-# Adiciona cabeçalhos de CORS manualmente para garantir a compatibilidade com a Vercel
-@app.after_request
-def add_cors_headers(response):
-    response.headers.add("Access-Control-Allow-Origin", "*")
-    response.headers.add("Access-Control-Allow-Headers", "Content-Type,Authorization")
-    response.headers.add("Access-Control-Allow-Methods", "GET,PUT,POST,DELETE,OPTIONS")
-    return response
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
