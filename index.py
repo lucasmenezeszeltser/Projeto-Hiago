@@ -9,19 +9,18 @@ import io
 # Inicializa o servidor web
 app = Flask(__name__)
 
-# Configuração de CORS robusta: 
-# Isso garante que os cabeçalhos de permissão sejam enviados mesmo em caso de erro 500.
+# Configuração de CORS robusta para permitir conexões do seu front-end
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# A chave da API deve ser configurada como variável de ambiente no Render
+# A chave da API deve estar nas variáveis de ambiente do Render
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 def dividir_texto(texto, tamanho=500):
-    """Divide o texto em pedaços menores para processamento de embeddings."""
+    """Divide o texto em pedaços menores para processamento."""
     return [texto[i:i+tamanho] for i in range(0, len(texto), tamanho)]
 
 def gerar_embedding(texto):
-    """Gera o vetor numérico (embedding) para um texto usando o modelo da OpenAI."""
+    """Gera o vetor numérico (embedding) para um único trecho."""
     response = client.embeddings.create(
         model="text-embedding-3-small",
         input=texto
@@ -36,8 +35,7 @@ def similaridade(v1, v2):
 
 @app.route('/', methods=['GET'])
 def health_check():
-    """Rota para verificar se o backend está online."""
-    return jsonify({"status": "online", "mensagem": "Backend está a funcionar!"}), 200
+    return jsonify({"status": "online", "mensagem": "Backend otimizado está online!"}), 200
 
 @app.route('/analisar', methods=['POST'])
 def analisar_pdf():
@@ -52,8 +50,7 @@ def analisar_pdf():
         return jsonify({"erro": "Arquivo vazio ou pergunta em branco"}), 400
 
     try:
-        # 2. Extração de Texto do PDF
-        # Usamos BytesIO para ler o arquivo da memória de forma segura
+        # 2. Extração de Texto com Otimização de Memória
         texto_completo = ""
         pdf_bytes = io.BytesIO(arquivo_pdf.read())
         
@@ -62,21 +59,30 @@ def analisar_pdf():
                 texto = pagina.extract_text()
                 if texto:
                     texto_completo += texto + "\n"
+                # Otimização: Limpa o cache da página após extrair o texto
+                pagina.flush_cache()
         
         if not texto_completo.strip():
             return jsonify({"erro": "Não foi possível extrair texto legível do PDF"}), 422
 
-        # 3. Processamento RAG (Busca por Contexto)
+        # 3. Processamento RAG Otimizado (Evita estourar a RAM)
         chunks = dividir_texto(texto_completo)
-        embeddings = [gerar_embedding(chunk) for chunk in chunks]
+        
+        # Geramos o embedding da pergunta primeiro
         embedding_pergunta = gerar_embedding(pergunta)
 
-        # 4. Cálculo de Similaridade
+        # Em vez de gerar todos os embeddings e guardar numa lista (que ocupa muita RAM),
+        # calculamos a similaridade um por um e guardamos apenas o score e o texto.
         scores = []
-        for i in range(len(embeddings)):
-            score = similaridade(embedding_pergunta, embeddings[i])
-            scores.append((score, chunks[i]))
+        for chunk in chunks:
+            try:
+                emb_chunk = gerar_embedding(chunk)
+                score = similaridade(embedding_pergunta, emb_chunk)
+                scores.append((score, chunk))
+            except Exception:
+                continue # Ignora chunks que falharem para não parar o processo
 
+        # 4. Seleção do Contexto
         # Ordenar e pegar os 3 trechos mais relevantes
         scores_ordenados = sorted(scores, reverse=True, key=lambda x: x[0])
         top_3 = scores_ordenados[:3]
@@ -85,7 +91,7 @@ def analisar_pdf():
         for score, texto in top_3:
             contexto += texto + "\n\n"
 
-        # 5. Geração da Resposta com GPT-4o-mini
+        # 5. Geração da Resposta
         resposta = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -103,11 +109,9 @@ def analisar_pdf():
         return jsonify({"resposta": resposta.choices[0].message.content})
 
     except Exception as e:
-        # Importante: Imprime o erro real nos logs do Render para debug
         print(f"ERRO CRÍTICO NO BACKEND: {str(e)}")
-        return jsonify({"erro": f"Erro interno no processamento: {str(e)}"}), 500
+        return jsonify({"erro": f"Erro interno: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    # O Render define a porta automaticamente através da variável de ambiente PORT
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
